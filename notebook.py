@@ -1,161 +1,71 @@
-# =============================================================
-# Short-Horizon Return Prediction Challenge by iRage
-# =============================================================
-# Competition: Predict short-horizon % return of Price
-# Metric: R2 Score (higher is better)
-# Constraint: Must run offline, CPU only, under 30 minutes
-# =============================================================
-
 import numpy as np
 import pandas as pd
-import warnings
-import os
-import gc
-warnings.filterwarnings('ignore')
-
-print("Libraries imported successfully")
-print("Python environment ready")
-
-# Create placeholder files to prevent FileNotFoundError from debug cells
-for _f in ['out3.txt', 'output.txt', 'out2.txt']: open(f'/kaggle/working/{_f}', 'w').close()
-
-# =============================================================
-# Cell 2: Load Data
-# =============================================================
-DATA_PATH = '/kaggle/input/competitions/short-horizon-return-prediction-challenge-by-i-rage/'
-
-print("Loading training data...")
-train = pd.read_parquet(DATA_PATH + 'train.parquet')
-print(f"Train shape: {train.shape}")
-
-print("Loading test data...")
-test = pd.read_parquet(DATA_PATH + 'test.parquet')
-print(f"Test shape: {test.shape}")
-
-print(f"Train columns: {list(train.columns)}")
-print(f"Test columns: {list(test.columns)}")
-
-# =============================================================
-# Cell 3: Feature Engineering & EDA
-# =============================================================
-print("\n" + "=" * 60)
-print("TARGET Statistics:")
-print("=" * 60)
-print(train['TARGET'].describe())
-print(f"\nSkewness: {train['TARGET'].skew():.4f}")
-print(f"Kurtosis: {train['TARGET'].kurt():.4f}")
-
-print("\n" + "=" * 60)
-print("Missing Values Check:")
-print("=" * 60)
-train_nulls = train.isnull().sum().sum()
-test_nulls = test.isnull().sum().sum()
-print(f"Train total nulls: {train_nulls}")
-print(f"Test total nulls: {test_nulls}")
-
-print("\n" + "=" * 60)
-print("Target outlier analysis:")
-print("=" * 60)
-q01 = train['TARGET'].quantile(0.01)
-q99 = train['TARGET'].quantile(0.99)
-print(f"1st percentile: {q01:.4f}")
-print(f"99th percentile: {q99:.4f}")
-pct_outliers = ((train['TARGET'] < q01) | (train['TARGET'] > q99)).mean() * 100
-print(f"Outliers outside [1%, 99%]: {pct_outliers:.2f}%")
-
-print("\n" + "=" * 60)
-print("Feature count breakdown:")
-print("=" * 60)
-feature_cols = [c for c in train.columns if c not in ['ID', 'TARGET'] and 'batch_id' not in c.lower()]
-lag1_cols = [c for c in feature_cols if '_LagT1' in c]
-lag2_cols = [c for c in feature_cols if '_LagT2' in c]
-lag3_cols = [c for c in feature_cols if '_LagT3' in c]
-print(f"Total feature columns: {len(feature_cols)}")
-print(f"  LagT1 features: {len(lag1_cols)}")
-print(f"  LagT2 features: {len(lag2_cols)}")
-print(f"  LagT3 features: {len(lag3_cols)}")
-
-# Feature engineering: Create ratio features LagT1/LagT2
-print("\n" + "=" * 60)
-print("Feature Engineering: Ratio features")
-print("=" * 60)
-train_fe = train.copy()
-test_fe = test.copy()
-
-ratio_count = 0
-for c1 in lag1_cols:
-    base_name = c1.replace('_LagT1', '')
-    c2 = base_name + '_LagT2'
-    if c2 in train_fe.columns:
-        nm = base_name + '_Ratio_T1T2'
-        train_fe[nm] = (train_fe[c1] / (train_fe[c2].abs() + 1e-8)).clip(-10, 10)
-        test_fe[nm] = (test_fe[c1] / (test_fe[c2].abs() + 1e-8)).clip(-10, 10)
-        ratio_count += 1
-
-final_features = [c for c in train_fe.columns if c not in ['ID', 'TARGET']]
-print(f"Added {ratio_count} ratio features. Total features: {len(final_features)}")
-
-# =============================================================
-# Cell 4: Target Clipping
-# =============================================================
-print("\nClipping target at [1%, 99%] percentiles...")
-y = train_fe['TARGET'].values.copy()
-y_clipped = np.clip(y, q01, q99)
-print(f"Target range before clip: [{y.min():.6f}, {y.max():.6f}]")
-print(f"Target range after clip:  [{y_clipped.min():.6f}, {y_clipped.max():.6f}]")
-
-# =============================================================
-# Cell 5: LightGBM 5-Fold CV Training
-# =============================================================
 import lightgbm as lgb
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupKFold
 from sklearn.metrics import r2_score
-
-X = train_fe[final_features].values
-X_test = test_fe[[c for c in final_features if c in test_fe.columns]].values
-y_c = y_clipped
-
-p = {
-    'objective': 'regression',
-    'metric': 'rmse',
-    'n_estimators': 600,
-    'learning_rate': 0.05,
-    'num_leaves': 127,
-    'min_child_samples': 50,
-    'subsample': 0.8,
-    'colsample_bytree': 0.8,
-    'verbose': -1,
-    'n_jobs': -1
-}
-
-kf = KFold(5, shuffle=True, random_state=42)
-oof = np.zeros(len(X))
-tp = np.zeros(len(X_test))
-models = []
-fs = []
-
-for fold, (ti, vi) in enumerate(kf.split(X)):
-    print(f"Fold {fold+1}/5")
-    m = lgb.LGBMRegressor(**p)
-    m.fit(X[ti], y_c[ti], eval_set=[(X[vi], y_c[vi])],
-          callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(200)])
-    oof[vi] = m.predict(X[vi])
-    s = r2_score(y_c[vi], oof[vi])
-    fs.append(s)
-    tp += m.predict(X_test) / 5
-    print(f"  R2={s:.6f} trees={m.n_estimators}")
-    del m
-    gc.collect()
-
-print(f"OOF R2={r2_score(y_c, oof):.6f} Mean={np.mean(fs):.6f} +/-{np.std(fs):.6f}")
-
-# =============================================================
-# Cell 6: Submission
-# =============================================================
-sub = pd.DataFrame({'ID': test['ID'], 'TARGET': tp})
-print(f"Submission shape: {sub.shape}")
-print(sub.head())
-print(f"NaN count: {sub['TARGET'].isna().sum()}")
+import gc, warnings, os
+warnings.filterwarnings('ignore')
+print('Loading data...')
+DATA = '/kaggle/input/competitions/short-horizon-return-prediction-challenge-by-i-rage/'
+train = pd.read_parquet(DATA + 'train.parquet')
+test = pd.read_parquet(DATA + 'test.parquet')
+TARGET_COL = 'TARGET'
+GROUP_COL = 'CV_GROUP'
+ID_COL = 'ID'
+y = train[TARGET_COL].values
+groups = train[GROUP_COL].values
+exclude_cols = [TARGET_COL, GROUP_COL, ID_COL]
+feature_cols = [c for c in train.columns if c not in exclude_cols]
+y_clip_val = float(np.percentile(np.abs(y), 99))
+y_clipped = np.clip(y, -y_clip_val, y_clip_val)
+X_train = train[feature_cols]
+X_test = test[feature_cols]
+test_ids = test[ID_COL].values
+del train, test
+gc.collect()
+p1 = dict(objective='regression',metric='rmse',boosting_type='gbdt',learning_rate=0.03,num_leaves=63,max_depth=7,min_child_samples=100,subsample=0.7,colsample_bytree=0.5,reg_alpha=0.1,reg_lambda=1.0,n_estimators=800,verbose=-1,n_jobs=-1,random_state=42)
+p2 = dict(objective='mae',metric='mae',boosting_type='gbdt',learning_rate=0.05,num_leaves=31,max_depth=6,min_child_samples=150,subsample=0.6,colsample_bytree=0.4,reg_alpha=0.5,reg_lambda=2.0,n_estimators=600,verbose=-1,n_jobs=-1,random_state=123)
+p3 = dict(objective='huber',metric='rmse',boosting_type='gbdt',learning_rate=0.04,num_leaves=47,max_depth=7,min_child_samples=120,subsample=0.65,colsample_bytree=0.45,reg_alpha=0.3,reg_lambda=1.5,n_estimators=700,verbose=-1,n_jobs=-1,random_state=77)
+def tm(par, nm, Xtr, ytr, grp, Xte, ns=5):
+    from sklearn.model_selection import GroupKFold
+    gkf = GroupKFold(n_splits=ns)
+    oof = np.zeros(len(ytr))
+    tp = np.zeros(len(Xte))
+    sc = []
+    for i,(tri,vi) in enumerate(gkf.split(Xtr, ytr, grp)):
+        Xt,yt = Xtr.iloc[tri], ytr[tri]
+        Xv,yv = Xtr.iloc[vi], ytr[vi]
+        m = lgb.LGBMRegressor(**par)
+        m.fit(Xt, yt, eval_set=[(Xv, yv)], callbacks=[lgb.early_stopping(50,verbose=False),lgb.log_evaluation(0)])
+        oof[vi] = m.predict(Xv)
+        tp += m.predict(Xte) / ns
+        r = r2_score(yv, oof[vi])
+        sc.append(r)
+        print(nm, 'fold', i+1, 'R2:', round(r, 6), 'iter:', m.best_iteration_)
+        del m, Xt, yt, Xv, yv
+        gc.collect()
+    print(nm, 'OOF R2:', round(r2_score(ytr, oof), 6))
+    return oof, tp
+print('Training M1 RMSE')
+o1,t1 = tm(p1,'M1',X_train,y_clipped,groups,X_test)
+print('Training M2 MAE')
+o2,t2 = tm(p2,'M2',X_train,y_clipped,groups,X_test)
+print('Training M3 Huber')
+o3,t3 = tm(p3,'M3',X_train,y_clipped,groups,X_test)
+print('Optimizing weights')
+br,bw = -999,(1/3,1/3,1/3)
+for w1 in np.arange(0.1,0.8,0.1):
+    for w2 in np.arange(0.1,0.9-w1,0.1):
+        w3 = round(1.0-w1-w2,2)
+        if w3 < 0.05: continue
+        r = r2_score(y_clipped, w1*o1+w2*o2+w3*o3)
+        if r > br: br,bw = r,(w1,w2,w3)
+w1,w2,w3 = bw
+print('Best weights:', w1, w2, w3, 'OOF R2:', round(br,6))
+ft = w1*t1 + w2*t2 + w3*t3
+pc = float(np.percentile(np.abs(ft), 99.5))
+ft = np.clip(ft, -pc, pc)
+import pandas as pd
+sub = pd.DataFrame({'ID': test_ids, 'TARGET': ft})
 sub.to_csv('submission.csv', index=False)
-print(f"Saved! Size: {os.path.getsize('submission.csv')/1e6:.2f} MB")
-print("submission.csv ready for competition!")
+print('Done. submission.csv shape:', sub.shape)
